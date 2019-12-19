@@ -1,0 +1,188 @@
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+
+library(data.table)
+library(ggplot2)
+library(igraph)
+library(reshape2)
+library(tidyverse)
+library(scales)
+library(stringr)
+library(psych)  #corr.test {psych}
+theme_set(theme_light())
+```
+
+
+
+```{r}
+make_pois_community <- function(num_samples = 100, num_otus = 10, lambda = 1, names = "OTU",
+                           sites = "Sample", fun = f) {
+  matrix(rpois(num_samples * num_otus, lambda),
+                        nrow = num_otus, ncol = num_samples,
+                        dimnames = list(
+                          paste(names, 1:num_otus, sep = "_"),
+                          paste(sites, 1:num_samples, sep = "_")
+                        )
+  
+)
+}
+
+make_unif_community<- function(num_samples = 50, num_otus = 10, lower = 100, upper = 120, names = "OTU",
+                           sites = "Sample", fun = f) {
+  matrix(runif(num_samples * num_otus, lower, upper),
+                        nrow = num_otus, ncol = num_samples,
+                        dimnames = list(
+                          paste(names, 1:num_otus, sep = "_"),
+                          paste(sites, 1:num_samples, sep = "_")
+                        )
+  )
+}
+
+
+
+make_negative_community<- function(num_samples = 50, num_otus = 10, lambda = 4, names = "OTU",
+                            sites = "Sample", fun = f){
+  matrix(1000 - rpois(num_samples * num_otus, lambda),
+                        nrow = num_otus, ncol = num_samples,
+                        dimnames = list(
+                          paste(names, 1:num_otus, sep = "_"),
+                          paste(sites, 1:num_samples, sep = "_")
+                        )
+  )
+}
+
+make_positive_community <- function(num_samples = 50, num_otus = 10, lambda = 4, names = "OTU",
+                            sites = "Sample", fun = f){
+  matrix(5 * rpois(num_samples * num_otus, lambda),
+                        nrow = num_otus, ncol = num_samples,
+                        dimnames = list(
+                          paste(names, 1:num_otus, sep = "_"),
+                          paste(sites, 1:num_samples, sep = "_")
+                        )
+  )
+}
+  
+
+```
+
+
+```{r}
+comm_1 <- make_pois_community(names = "COMM_A", num_samples = 100, num_otus = 5, lambda = 100)
+comm_2 <- make_negative_community(names = "COMM_C", num_samples = 100, num_otus = 5, lambda = 100)
+comm_3 <- make_positive_community(names = "COMM_D", num_samples = 100, num_otus = 5, lambda = 4000)
+noise <- make_pois_community(num_otus = 50)
+sim_community <- rbind(comm_1, comm_2, comm_3, noise)
+```
+
+#plot_dd function can plot degree distribution of graph object
+```{r plot_dd.function}
+plot_dd <- function(g){
+  g.dd <- data.frame(0:(length(degree_distribution(g)) - 1), 
+                     degree_distribution(g, cumulative = FALSE))
+  colnames(g.dd) <-c("k", "p_k")
+  ggplot(g.dd, aes(x = k, y = p_k)) + geom_bar(stat = "identity") +
+    labs(x = "Degree (k)", y = "Proportion of nodes of degree k (p(k))", title = "Degree distribution: k vs. p(k)", 
+         subtitle = paste("Graph:", deparse(substitute(g)))) +
+    theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5)) + 
+    scale_x_continuous(breaks = function(x) seq(ceiling(x[1]), floor(x[2]), by = 1))
+}
+```
+
+#getting correlation matrix (OTU BY OTU)
+```{r}
+sim_community.cor_matrix <- cor(t(sim_community), method = "spearman")
+```
+
+
+#getting correlation matrix with different correction method by changing the adjust = "" in the first line of code
+p.adjust.methods
+# ("holm", "hochberg", "hommel", "bonferroni", "BH", "BY", "fdr", "none")
+```{r test case}
+test_network <- corr.test(sim_community.cor_matrix, y = NULL, use = "pairwise", method="spearman", adjust = "BH",alpha=0.05) 
+a <- test_network$r[-1]
+b <- test_network$p
+test_sig_correlation =ifelse( b < 0.05, a, NA)
+cor.plot(test_sig_correlation)
+threshold <-test_sig_correlation
+threshold[threshold >= 0.3] <- 1
+threshold[threshold <= -0.3] <- -1
+threshold[threshold >= -0.3 & threshold <= 0.3] <- 0
+threshold_graph <- graph_from_adjacency_matrix(threshold, mode ="undirected", diag =FALSE)
+threshold_graph.copy <- delete.vertices(threshold_graph, degree(threshold_graph) == 0)
+plot(threshold_graph.copy, 
+     layout = layout.fruchterman.reingold(threshold_graph.copy),
+     main = "Network with isolated nodes removed")
+cfg <- cluster_fast_greedy(threshold_graph.copy)
+plot(cfg, threshold_graph.copy)
+ceb<- cluster_edge_betweenness(threshold_graph.copy)
+plot(ceb,
+     threshold_graph.copy)
+E(threshold_graph.copy) #check out the edge attribute of the graph
+which.max(degree(threshold_graph.copy)) #check out the highest degree nodes
+plot_dd(threshold_graph)
+plot_dd(threshold_graph.copy)
+```
+
+
+
+STEP BY STEP:
+#1. selecting only significant OTU Pairs by thresholding p-value <0.05 and correlation values not equal to 1
+```{r}
+a <- test_network$r[-1] #dropping correlation values that are 1
+b <- test_network$p
+sig_correlation =ifelse( b < 0.05, a, NA)
+```
+
+#2. getting correlation plot(heatmap)
+```{r}
+cor.plot(sig_correlation)
+```
+
+#3. thresholding the values of this correlation matrix. We say that two OTUs are *positively correlated* if the Spearman correlation between them is grater than $0.30$.
+```{r}
+threshold <- sig_correlation
+threshold[threshold >= 0.3] <- 1 #Assigning 1 to all the values of the matrix above our cutoff:
+threshold[threshold <= -0.3] <- -1 #Doing the same for negatively co
+threshold[threshold >= -0.3 & threshold <= 0.3] <- 0 #Setting everything else to 0 since they don't fall into our definition                                                        of positive or negatively correlated
+```
+
+#4. make correlation graph from threshold correlation matrix
+```{r}
+threshold_graph <- graph_from_adjacency_matrix(threshold, mode ="undirected", diag =FALSE)
+```
+
+#5. plot correlation graph
+```{r}
+gorder(threshold_graph) #get the number of edges for the graph
+plot(threshold_graph, 
+     layout = layout.fruchterman.reingold(threshold_graph),
+     main = "Network")
+```
+
+#6. plot the correlation graoh with isolated nodes removed
+```{r}
+threshold_graph.copy <- delete.vertices(threshold_graph, degree(threshold_graph) == 0)
+gorder(threshold_graph.copy) 
+plot(threshold_graph.copy, 
+     layout = layout.fruchterman.reingold(threshold_graph.copy),
+     main = "Network with isolated nodes removed")
+```
+
+#7. plot the degree distribution using plot_dd function
+```{r}
+plot_dd(threshold_graph.copy)
+```
+
+#8. clustering by cluster fast greedy method
+```{r}
+cfg <- cluster_fast_greedy(threshold_graph.copy)
+plot(cfg, threshold_graph.copy)
+
+```
+
+#9. clustering by edge betweeness method
+```{r}
+ceb <- cluster_edge_betweenness(threshold_graph.copy)
+plot(ceb, threshold_graph.copy)
+```
