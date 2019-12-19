@@ -1,0 +1,341 @@
+---
+title: "Working with phyloseq objects and iGraph"
+author: "Paul Villanueva"
+date: "7/15/2019"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(data.table)
+library(ggplot2)
+library(igraph)
+library(phyloseq)
+library(reshape2)
+library(tidyverse)
+library(scales)
+library(stringr)
+
+theme_set(theme_light())
+```
+
+## Simulating communities
+
+Randomly generate abundance counts for 10 OTUs across 20 samples:
+
+```{r simulate_community.1}
+sim_community <- matrix(sample(1:100, 200, replace = TRUE),
+                        nrow = 10, ncol = 20,
+                        dimnames = list(
+                          paste("OTU", 1:10, sep = "_"),
+                          paste("Sample", 1:20, sep = "_")
+                        )
+  
+)
+```
+
+Let's look at a small portion of this data...
+
+```{r simulate_community.2}
+head(sim_community)
+```
+
+...and visualize the communities.
+
+```{r simulate_community.3}
+sim_community %>% 
+  t() %>% 
+  melt() %>%
+  ggplot(aes(x = Var1, y = fct_rev(Var2), fill = value)) + 
+  geom_tile(color = "black") +
+  labs(x = "", y = "", 
+       title = "Community composition of simulated community") + 
+  theme(axis.text.x = element_text(angle = 90),
+        legend.position = "none",
+        axis.ticks = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank()) +
+  scale_x_discrete(label = function (x) str_replace(x, "_", " "),
+                   expand = c(0, 0)) +
+  scale_y_discrete(label = function (x) str_replace(x, "_", " "),
+                   expand = c(0, 0))
+  
+```
+
+Note that we have samples as the columns and OTUs as the rows.
+
+## Making a Phyloseq object from the simulated communities
+
+Since we don't have treatment or taxonomic data for these simulated communities, we'll also simulate this missing information.  We'll use the function below to do so:
+
+```{r simulate_taxonomy.1}
+sim.sample.tax_info <- function(num_otus){
+  tax_mat <- matrix(sample(letters, 7 * num_otus, replace = TRUE), 
+                    nrow = num_otus, ncol = 7,
+                    dimnames = list(paste("OTU", 1:num_otus, sep = "_"), 
+                                    c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species")))
+  
+  return(tax_mat)
+}
+```
+
+The `sim.sample.tax_info` function takes as input the number of OTUs we want to simulate information for and returns a matrix containing simulated taxanomic information for these OTUs. Below, we use `nrow(sim_community` to keep 
+
+```{r simulate_taxonomy.1}
+sim_community.tax_info <- sim.sample.tax_info(nrow(sim_community))
+```
+
+Here's what the simulated data looks like:
+
+```{r simulate_taxonomy.1}
+head(sim_community.tax_info)
+```
+
+Similarly, we can simulated the sample data with the below function:
+
+```{r simulate_sample.1}
+sim.sample.treatment_data <- function(otu_table){
+  sample_matrix <- sample_data(data.frame(
+    Treatment = rep("Simulated", ncol(otu_table)),
+    row.names = colnames(otu_table),
+    stringsAsFactors = FALSE
+  ))
+  return(sample_matrix)
+}
+```
+
+`sim.sample.treatment_data` takes the OTU table itself as input and returns an appropriate matrix with all the same treatment, indicating that it was simulated. For example,
+
+```{r simulate_sample.2}
+sim_community.sample_info <- sim.sample.treatment_data(sim_community)
+```
+
+The top portion:
+
+```{r simulate_sample.3}
+head(sim_community.sample_info)
+```
+
+All we need to do now is combine them all into a phyloseq object:
+
+```{r simulate_phyloseq.1}
+sim_community.phyloseq <- phyloseq(otu_table(sim_community, taxa_are_rows = TRUE),
+                                   tax_table(sim_community.tax_info),
+                                   sim_community.sample_info)
+sim_community.phyloseq
+```
+
+From here, you can work with the `sim_community.phyloseq` object however you like. For example, you can check out the [Phylosmith](https://schuyler-smith.github.io/phylosmith/index.html) and work with your data from there. A lot of the rest of this document 
+
+## Converting to networks
+
+If all you wanted to do was network analysis, you could do that straight from the OTU table. We begin with getting a correlation matrix from the table:
+
+```{r simulate_cor.1}
+sim_community.cor_matrix <- cor(t(sim_community), method = "spearman")
+head(sim_community.cor_matrix)
+```
+
+Notice that we transpose the simulated OTU matrix so we get OTU-by-OTU coocurrence and not sample-by-sample coocurrence.
+And from here we can make a network using `igraph`'s :
+
+```{r graph.1}
+sim_community.graph <- graph_from_adjacency_matrix(sim_community.cor_matrix, mode = "undirected",
+                                                   diag = FALSE, weighted=TRUE)
+```
+
+We set the mode to undirected because we do not make any assumptions about causality relationships in the community, and we set the diagonal to false so we don't get any self-loops.
+
+From here, you can make a basic plot:
+
+```{r graph.2}
+plot(sim_community.graph)
+```
+
+It's possible to make the plot a lot prettier, but it's honestly a huge hassle. I highly recommend using [Phylosmith's graphing visualization function](https://schuyler-smith.github.io/phylosmith/graphs.html#co_occurrence_network) to do this instead of spending a lot of time figuring it out in base iGraph. Alternatively, you can port the network to another software by writing it out to a tsv or csv: 
+
+```{r graph.3}
+write.cor_to_edgelist <- function(cor_matrix, fout){
+  cor_matrix %>% 
+    melt() %>% 
+    filter(value != 0) %>% 
+    write.csv(fout, quote = FALSE, row.names = FALSE)
+}
+```
+
+```{r graph.4}
+write.cor_to_edgelist(sim_community.cor_matrix, "correlation_matrix.csv")
+```
+
+This turns the correlation matrix into an edgelist format that is compatible with, for instance, Cytoscape.
+
+## Working with networks
+
+We can look at the degree distribution of the network we created by calling `degree_distribution(sim_community.graph)`. We can visualize this using the `plot_dd` function below:
+
+```{r more_graph.1}
+plot_dd <- function(g){
+  g.dd <- data.frame(0:(length(degree_distribution(g)) - 1), 
+                     degree_distribution(g, cumulative = FALSE))
+  colnames(g.dd) <-c("k", "p_k")
+  ggplot(g.dd, aes(x = k, y = p_k)) + geom_bar(stat = "identity") +
+    labs(x = "Degree (k)", y = "Proportion of nodes of degree k (p(k))", title = "Degree distribution: k vs. p(k)", 
+         subtitle = paste("Graph:", deparse(substitute(g)))) +
+    theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5)) + 
+    scale_x_continuous(breaks = function(x) seq(ceiling(x[1]), floor(x[2]), by = 1))
+}
+```
+
+```{r more_graph.2}
+plot_dd(sim_community.graph)
+```
+
+Since all of our OTUs are connected to each other, there isn't much to see here. Let's threshold our matrix to only look at significant relationships. We'll first bootstrap some correlation values with the `bootstrap_cor` function. 
+
+```{r more_graph.3}
+bootstrap_cor <- function(otu_table, B = 1000, method = "spearman") {
+
+  library(data.table)
+
+  dat.observed <- otu_table %>%
+    t()
+
+  n <- ncol(dat.observed)
+  boots = data.table(c_score = numeric(), counts = numeric())
+
+  for (i in 1:B){
+    dat.perm <- data.table(dat.observed[, sample(n, n, replace = TRUE)])
+
+    cor.perm <- data.table(c(round(cor(dat.perm, method = method), 3)))
+    cor.perm[, counts := .N, by = .(V1)]
+    cor.perm <- unique(cor.perm)
+
+    boots <- rbindlist(list(boots, cor.perm))[, lapply(.SD, sum, na.rm = TRUE),
+                                              by = .(c_score)]
+
+  }
+
+  boots <- boots %>% arrange(-c_score) %>% data.table()
+
+  return(boots)
+}
+```
+
+```{r}
+sim_community.bootstraps <- bootstrap_cor(t(sim_community))
+```
+
+This returns a count table with the number of times a particular correlation value was observed:
+
+```{r}
+head(sim_community.bootstraps)
+```
+
+There are a lot of correlation values of 1 in our data, so I'm going to drop that before I do any threshold setting:
+
+```{r}
+sim_community.bootstraps <- sim_community.bootstraps[-1]
+head(sim_community.bootstraps)
+```
+
+We'll now get thresholds by looking for the values that are in the outer half of observations (that is, the correlations that are in the top and bottom 25% of observed values)...
+
+```{r}
+bootstrap_quantiles <- function(boots, p) {
+  boots[, prop := counts/sum(counts)]
+
+  quantiles <- boots[, list(
+    upper = c_score[sum(cumsum(prop) <= (p / 2))],
+    lower = c_score[sum(cumsum(prop) <= (1 - (p / 2)))]
+  )]
+
+  return(quantiles)
+}
+```
+
+```{r}
+sim_community.quantiles <- bootstrap_quantiles(sim_community.bootstraps, 0.50)
+```
+
+...and visualize the distribution:
+
+```{r}
+plot_bootstrap <- function(boots, quantiles) {
+  ggplot(boots, aes(x = c_score, y = counts)) +
+    geom_col() +
+    scale_y_continuous(limits = c(0, max(boots$counts))) +
+    labs(x = "Pearson correlation", y = "Counts",
+         title = "Simulated correlation values (1000 iterations)") +
+    geom_vline(xintercept = c(quantiles$lower, quantiles$upper), color = "#BB0000", linetype = 'dashed') +
+    geom_text(aes(x = quantiles$lower , label = paste(quantiles$lower), y = max(boots$counts) * 0.75),
+              colour = "#BB0000", size = 3, nudge_x = 0.05) +
+    geom_text(aes(x = quantiles$upper , label = paste(quantiles$upper), y = max(boots$counts) * 0.75),
+              colour = "#BB0000", size = 3, nudge_x = -0.05)
+}
+```
+
+```{r}
+plot_bootstrap(sim_community.bootstraps, sim_community.quantiles)
+```
+
+So we see that appropriate thresholds for our system are -0.201 and 0.195. Let's threshold our correlation matrix to reflect this. We'll set any observations below -0.195 and above 0.201 to 1, and any observations in between these two values to 0:
+
+```{r}
+threshold_cor_matrix <- function(cor.matrix, quantiles){
+  cor.matrix[cor.matrix >= quantiles$upper] <- 1
+  cor.matrix[cor.matrix <= quantiles$lower] <- -1
+  cor.matrix[cor.matrix < quantiles$upper & cor.matrix > quantiles$lower] <- 0
+
+  return(cor.matrix)
+}
+```
+
+```{r}
+sim_community.cor_matrix <- threshold_cor_matrix(sim_community.cor_matrix, sim_community.quantiles)
+```
+
+Let's take a look at the new graph:
+
+```{r}
+sim_community.graph <- graph_from_adjacency_matrix(sim_community.cor_matrix, mode = "undirected",
+                                                   diag = FALSE)
+plot(sim_community.graph)
+```
+
+And the new degree distribution:
+
+```{r}
+plot_dd(sim_community.graph)
+```
+
+Let's look at the nodes with the highest degrees. There are a couple different ways to do this. For example, say you wanted to get a list of all the OTUs with a degree higher than, say, 2:
+
+```{r}
+names(V(sim_community.graph)[degree(sim_community.graph) > 2])
+```
+
+Here, `V(sim_community.graph)` accesses the vertices of the graph, and the expression in brackets subsets by those nodes with degree higher than 2.
+
+On the other hand, say I wanted the nodes with degree in the highest 10%. Then I would do something like:
+
+```{r}
+highest_degree_nodes <- function(g, p = 0.05){
+  sorted_degrees <- sort(degree(g), decreasing = TRUE)
+  degree_thresh <- sorted_degrees[ceiling(p * length(g))]
+  return(names(V(g)[degree(g) >= degree_thresh]))
+  
+}
+```
+
+
+```{r}
+highest_degree_nodes(sim_community.graph, p = 0.1)
+```
+
+Hope this helps!
+
+
